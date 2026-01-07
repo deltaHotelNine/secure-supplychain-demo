@@ -117,7 +117,7 @@ jobs:
                   grype "${IMAGE_LOCAL_REF}" -o sarif > grype-results.sarif
 
             - name: Upload SBOM and scan results (artifact)
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v6
               with:
                   name: security-artifacts-${{ github.run_id }}
                   path: |
@@ -206,7 +206,7 @@ jobs:
 
             - name: Upload image reference (artifact)
               if: github.event_name == 'push'
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v6
               with:
                   name: image-reference-${{ github.run_id }}
                   path: |
@@ -244,7 +244,7 @@ jobs:
 
             - name: Upload signature verification (artifact)
               if: github.event_name == 'push'
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v6
               with:
                   name: signature-evidence-${{ github.run_id }}
                   path: cosign-verify.json
