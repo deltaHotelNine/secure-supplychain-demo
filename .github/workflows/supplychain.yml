@@ -25,12 +25,12 @@ jobs:
               uses: actions/checkout@v4
 
             - name: Initialize CodeQL
-              uses: github/codeql-action/init@v3
+              uses: github/codeql-action/init@v4
               with:
                 languages: python
 
             - name: Perform CodeQL Analysis
-              uses: github/codeql-action/analyze@v3
+              uses: github/codeql-action/analyze@v4
 
             - name: SonarCloud Scan
               if: ${{ env.SONAR_TOKEN != '' }}
@@ -172,7 +172,7 @@ jobs:
                 ' >> $GITHUB_STEP_SUMMARY
 
             - name: Upload Scan Results (SARIF)
-              uses: github/codeql-action/upload-sarif@v3
+              uses: github/codeql-action/upload-sarif@v4
               with:
                 sarif_file: grype-results.sarif
                 category: container-scanning
