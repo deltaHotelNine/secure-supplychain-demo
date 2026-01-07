@@ -1,0 +1,44 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+    name: disallow-latest-tag
+    annotations:
+        policies.kyverno.io/title: Disallow Latest Tag
+        policies.kyverno.io/category: Security
+spec:
+    validationFailureAction: Enforce
+    background: false
+    rules:
+        - name: require-image-tag-or-digest
+          match:
+              any:
+                  - resources:
+                        kinds:
+                            - Pod
+          validate:
+              message: "Use of an image tag or digest is required for container images."
+              pattern:
+                  spec:
+                      containers:
+                          - image: "*:*"
+                      =(initContainers):
+                          - image: "*:*"
+                      =(ephemeralContainers):
+                          - image: "*:*"
+
+        - name: disallow-latest
+          match:
+              any:
+                  - resources:
+                        kinds:
+                            - Pod
+          validate:
+              message: "Using the 'latest' tag for container images is not allowed. Please specify a specific version tag or a digest."
+              pattern:
+                  spec:
+                      containers:
+                          - image: "!*:latest"
+                      =(initContainers):
+                          - image: "!*:latest"
+                      =(ephemeralContainers):
+                          - image: "!*:latest"

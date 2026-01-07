@@ -1,0 +1,23 @@
+name: Compliance Audit (Strict)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  strict-scan:
+    name: Build & Enforce Security Policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t demo-audit .
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Scan with Enforcement (Fail on High/Critical)
+        run: |
+          grype demo-audit --fail-on high

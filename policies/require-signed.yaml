@@ -1,0 +1,37 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+    name: require-signed-images
+    annotations:
+        policies.kyverno.io/title: Require Signed Images
+        policies.kyverno.io/category: Security
+spec:
+    validationFailureAction: Enforce
+    background: false
+    webhookTimeoutSeconds: 30
+    failurePolicy: Fail
+    rules:
+        - name: verify-signed-ghcr-images
+          match:
+              any:
+                  - resources:
+                        kinds:
+                            - Pod
+                            - Deployment
+                            - StatefulSet
+                            - DaemonSet
+                            - Job
+                            - CronJob
+          verifyImages:
+              - imageReferences:
+                    - "ghcr.io/deltahotelnine/secure-supplychain-demo*"
+                failureAction: Enforce
+                attestors:
+                    - count: 1
+                      entries:
+                          - keys:
+                                publicKeys: |-
+                                    -----BEGIN PUBLIC KEY-----
+                                    MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE3Md52FrQAKw6kYfQjkl3Obf58Yla
+                                    AlAPiAcYkdxdLi1s/cFS/744G612wKKwPcxq6aoBMyd3b0gjWW9u3izOSg==
+                                    -----END PUBLIC KEY-----

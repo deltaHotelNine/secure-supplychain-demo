@@ -1,0 +1,265 @@
+name: Secure Supply Chain Pipeline
+
+on:
+    push:
+        branches: ["main"]
+    pull_request:
+        branches: ["main"]
+    workflow_dispatch: {}
+
+permissions:
+    contents: read
+    packages: write
+    security-events: write
+
+env:
+    REGISTRY: ghcr.io
+    IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+    sast-analysis:
+        name: SAST & Code Quality
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Initialize CodeQL
+              uses: github/codeql-action/init@v3
+              with:
+                languages: python
+
+            - name: Perform CodeQL Analysis
+              uses: github/codeql-action/analyze@v3
+
+            - name: SonarCloud Scan
+              if: ${{ env.SONAR_TOKEN != '' }}
+              uses: SonarSource/sonarcloud-github-action@master
+              env:
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+    build-sbom-scan-sign:
+        name: Build, SBOM, Scan, and Sign
+        needs: [sast-analysis]
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Compute image refs (lowercase for GHCR)
+              id: computerefs
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  IMAGE_NAME="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+                  IMAGE_LOCAL_REF="${IMAGE_NAME}:${IMAGE_TAG}"
+                  IMAGE_REF="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+                  echo "IMAGE_NAME=${IMAGE_NAME}" >> "${GITHUB_ENV}"
+                  echo "IMAGE_LOCAL_REF=${IMAGE_LOCAL_REF}" >> "${GITHUB_ENV}"
+                  echo "IMAGE_REF=${IMAGE_REF}" >> "${GITHUB_ENV}"
+
+                  echo "IMAGE_REF=${IMAGE_REF}" >> "${GITHUB_OUTPUT}"
+
+                  echo "IMAGE_NAME=${IMAGE_NAME}"
+                  echo "IMAGE_LOCAL_REF=${IMAGE_LOCAL_REF}"
+                  echo "IMAGE_REF=${IMAGE_REF}"
+
+            - name: Build image (local)
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  docker build -t "${IMAGE_LOCAL_REF}" .
+
+            - name: Log in to GHCR
+              if: github.event_name == 'push'
+              uses: docker/login-action@v3
+              with:
+                  registry: ${{ env.REGISTRY }}
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Tag image for GHCR
+              if: github.event_name == 'push'
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  docker tag "${IMAGE_LOCAL_REF}" "${IMAGE_REF}"
+
+            - name: Install Syft and Grype
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh  | sh -s -- -b /usr/local/bin
+                  curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+                  syft version
+                  grype version
+
+            - name: Generate SBOM (CycloneDX JSON + Table)
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  # Output pretty table to console
+                  syft packages "${IMAGE_LOCAL_REF}" -o table
+                  # Generate artifact
+                  syft packages "${IMAGE_LOCAL_REF}" -o cyclonedx-json > sbom.cdx.json
+
+            - name: Scan for vulnerabilities (Grype JSON + Table + SARIF)
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  # Output pretty table to console
+                  grype "${IMAGE_LOCAL_REF}" -o table
+                  # Generate artifact
+                  grype "${IMAGE_LOCAL_REF}" -o json > grype-results.json
+                  # Generate SARIF for Security Tab
+                  grype "${IMAGE_LOCAL_REF}" -o sarif > grype-results.sarif
+
+            - name: Upload SBOM and scan results (artifact)
+              uses: actions/upload-artifact@v4
+              with:
+                  name: security-artifacts-${{ github.run_id }}
+                  path: |
+                      sbom.cdx.json
+                      grype-results.json
+                      grype-results.sarif
+
+            - name: Generate Visual Summary
+              shell: bash
+              run: |
+                # Use Python to parse JSON and output Markdown
+                python3 -c '
+                import json
+                import os
+
+                try:
+                    with open("grype-results.json", "r") as f:
+                        data = json.load(f)
+                except FileNotFoundError:
+                    print("Grype results not found.")
+                    exit(0)
+
+                print("### 🛡️ Vulnerability Report")
+                print("| Severity | Package | Version | Vulnerability |")
+                print("| :--- | :--- | :--- | :--- |")
+
+                # Map severity to emoji
+                severity_emoji = {
+                    "Critical": "🔴",
+                    "High": "🟠", 
+                    "Medium": "🟡",
+                    "Low": "🔵",
+                    "Negligible": "⚪",
+                    "Unknown": "❔"
+                }
+
+                # Sort by severity (Critical first)
+                order = ["Critical", "High", "Medium", "Low", "Negligible", "Unknown"]
+                matches = data.get("matches", [])
+                
+                # Simple sorter
+                matches.sort(key=lambda x: order.index(x["vulnerability"]["severity"]) if x["vulnerability"]["severity"] in order else 99)
+
+                for m in matches:
+                    sev = m["vulnerability"]["severity"]
+                    emoji = severity_emoji.get(sev, "❔")
+                    pkg = m["artifact"]["name"]
+                    ver = m["artifact"]["version"]
+                    vuln = m["vulnerability"]["id"]
+                    print(f"| {emoji} {sev} | {pkg} | {ver} | {vuln} |")
+                
+                ' >> $GITHUB_STEP_SUMMARY
+
+            - name: Upload Scan Results (SARIF)
+              uses: github/codeql-action/upload-sarif@v3
+              with:
+                sarif_file: grype-results.sarif
+                category: container-scanning
+
+            - name: Push image to GHCR and capture digest
+              id: pushimage
+              if: github.event_name == 'push'
+              uses: docker/build-push-action@v4
+              with:
+                  push: true
+                  tags: ${{ steps.computerefs.outputs.IMAGE_REF }}
+              
+            - name: Capture image digest
+              if: github.event_name == 'push'
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  DIGEST="${{ steps.pushimage.outputs.digest }}"
+                  if [ -z "${DIGEST}" ]; then
+                    echo "ERROR: build-push-action did not return a digest!"
+                    exit 1
+                  fi
+                  echo "Captured image digest: ${DIGEST}"
+                  IMAGE_REF_DIGEST="${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+
+                  echo "IMAGE_REF_DIGEST=${IMAGE_REF_DIGEST}" >> "${GITHUB_ENV}"
+
+                  echo "${IMAGE_REF}"        > image-ref-tag.txt
+                  echo "${IMAGE_REF_DIGEST}" > image-ref-digest.txt
+                  echo "${DIGEST}"           > image-digest.txt
+
+            - name: Upload image reference (artifact)
+              if: github.event_name == 'push'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: image-reference-${{ github.run_id }}
+                  path: |
+                      image-ref-tag.txt
+                      image-ref-digest.txt
+                      image-digest.txt
+
+            - name: Install Cosign
+              if: github.event_name == 'push'
+              uses: sigstore/cosign-installer@v3
+
+            - name: Write Cosign private key
+              if: github.event_name == 'push'
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  printf '%s' "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
+                  chmod 600 cosign.key
+
+            - name: Sign image by digest (Cosign)
+              if: github.event_name == 'push'
+              env:
+                  COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  printf 'y' | cosign sign --key cosign.key "${IMAGE_REF_DIGEST}"
+
+            - name: Verify signature (record evidence)
+              if: github.event_name == 'push'
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  cosign verify --key cosign.pub "${IMAGE_REF_DIGEST}" > cosign-verify.json
+
+            - name: Upload signature verification (artifact)
+              if: github.event_name == 'push'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: signature-evidence-${{ github.run_id }}
+                  path: cosign-verify.json
+
+            - name: Workflow summary
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  echo "## Supply Chain Build Summary" >> "${GITHUB_STEP_SUMMARY}"
+                  echo "- SAST Analysis (CodeQL/Sonar) completed." >> "${GITHUB_STEP_SUMMARY}"
+                  echo "- SBOM + Grype results uploaded as workflow artifacts." >> "${GITHUB_STEP_SUMMARY}"
+                  if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+                    echo "- Pushed: \`${IMAGE_REF}\`" >> "${GITHUB_STEP_SUMMARY}"
+                    echo "- Digest: \`${IMAGE_REF_DIGEST}\`" >> "${GITHUB_STEP_SUMMARY}"
+                    echo "- Signed + verified (Cosign key-based)." >> "${GITHUB_STEP_SUMMARY}"
+                  else
+                    echo "- PR run: built locally and generated evidence (no push/sign)." >> "${GITHUB_STEP_SUMMARY}"
+                  fi
