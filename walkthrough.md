@@ -800,9 +800,9 @@ jobs:
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
-      - name: Scan with Enforcement (Fail on High/Critical)
+      - name: Scan with Enforcement (Fail on Medium)
         run: |
-          grype demo-audit --fail-on high
+          grype demo-audit --fail-on medium
 ```
 **File #3** - `.github/dependabot.yml`:
 ```yaml
